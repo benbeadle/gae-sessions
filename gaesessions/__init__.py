@@ -48,10 +48,14 @@ def is_gaesessions_key(k):
     return k.startswith(COOKIE_NAME_PREFIX)
 
 
-class SessionModel(db.Model):
+class SessionModel(ndb.Model):
     """Contains session data.  key_name is the session ID and pdump contains a
     pickled dictionary which maps session variables to their values."""
-    pdump = db.BlobProperty()
+    pdump = ndb.BlobProperty()
+
+    @classmethod
+    def _get_kind(cls):
+        return 'SeS'
 
 
 class Session(object):
@@ -199,10 +203,10 @@ class Session(object):
         eP = {}  # for models encoded as protobufs
         eO = {}  # for everything else
         for k, v in d.iteritems():
-            if isinstance(v, db.Model):
-                eP[k] = db.model_to_protobuf(v)
-            elif isinstance(v, ndb.Model):
+            if isinstance(v, ndb.Model):
                 eP[k] = ndb.ModelAdapter().entity_to_pb(v).Encode()
+            elif isinstance(v, db.Model):
+                eP[k] = db.model_to_protobuf(v)
             else:
                 eO[k] = v
         return pickle.dumps((eP, eO), 2)
@@ -214,11 +218,14 @@ class Session(object):
             eP, eO = pickle.loads(pdump)
             for k, v in eP.iteritems():
                 try:
-                    eO[k] = db.model_from_protobuf(v)
-                except Exception, e:
                     eO[k] = ndb.ModelAdapter().pb_to_entity(entity_pb.EntityProto(v))
+                except:
+                    try:
+                        eO[k] = db.model_from_protobuf(v)
+                    except Exception, e:
+                        logging.warn("failed ({}) to decode session key {}: {}".format(e.message, k))
         except Exception, e:
-            logging.warn("failed to decode session data: %s" % e)
+            logging.warn("Big failure decoding session data: %s" % e)
             eO = {}
         return eO
 
@@ -274,7 +281,7 @@ class Session(object):
         if self.sid:
             self.__clear_data()
         self.sid = sid
-        self.db_key = db.Key.from_path(SessionModel.kind(), sid, namespace='')
+        self.db_key = ndb.Key(SessionModel._get_kind(), sid, namespace='')
 
         # set the cookie if requested
         if make_cookie:
@@ -285,7 +292,7 @@ class Session(object):
         if self.sid:
             memcache.delete(self.sid, namespace='')  # not really needed; it'll go away on its own
             try:
-                db.delete(self.db_key)
+                self.db_key.delete()
             except:
                 pass  # either it wasn't in the db (maybe cookie/memcache-only) or db is down => cron will expire it
 
@@ -300,7 +307,7 @@ class Session(object):
                 logging.info("can't find session data in memcache for sid=%s (using memcache only sessions)" % self.sid)
                 self.terminate(False)  # we lost it; just kill the session
                 return
-            session_model_instance = db.get(self.db_key)
+            session_model_instance = self.db_key.get()
             if session_model_instance:
                 pdump = session_model_instance.pdump
             else:
@@ -347,7 +354,7 @@ class Session(object):
         if dirty is Session.DIRTY_BUT_DONT_PERSIST_TO_DB or self.no_datastore:
             return
         try:
-            SessionModel(key_name=self.sid, pdump=pdump).put()
+            SessionModel(id=self.sid, pdump=pdump).put()
         except Exception, e:
             logging.warning("unable to persist session to datastore for sid=%s (%s)" % (self.sid, e))
 
@@ -512,10 +519,16 @@ def delete_expired_sessions():
     Returns True if all expired sessions have been removed.
     """
     now_str = unicode(int(time.time()))
-    q = db.Query(SessionModel, keys_only=True, namespace='')
-    key = db.Key.from_path('SessionModel', now_str + u'\ufffd', namespace='')
-    q.filter('__key__ < ', key)
-    results = q.fetch(500)
-    db.delete(results)
-    logging.info('gae-sessions: deleted %d expired sessions from the datastore' % len(results))
-    return len(results) < 500
+    key = ndb.Key(SessionModel._get_kind(), now_str + u'\ufffd', namespace='')
+    logging.info ("FENCEPOST KEY: {}".format(key))
+    q = SessionModel.query(SessionModel.key < key, default_options=ndb.QueryOptions(keys_only=True, limit=500), namespace='')
+    class Mapper (object):
+        total = 0
+        def __call__ (self, key):
+            self.total += 1
+            #key.delete ()
+            logging.info("Would delete: {}".format(key))
+    m = Mapper ()
+    q.map(m)
+    logging.info('gae-sessions: deleted %d expired session(s) from the datastore' % m.total)
+    return m.total < 500
