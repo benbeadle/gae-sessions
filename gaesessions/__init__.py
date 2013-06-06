@@ -9,6 +9,7 @@ import pickle
 import os
 import threading
 import time
+import traceback
 
 from google.appengine.api import memcache
 from google.appengine.ext import db, ndb
@@ -64,7 +65,7 @@ class Session(object):
     ``sid`` - if set, then the session for that sid (if any) is loaded. Otherwise,
     sid will be loaded from the HTTP_COOKIE (if any).
     """
-    DIRTY_BUT_DONT_PERSIST_TO_DB = 1
+    DIRTY_BUT_DONT_PERSIST_xTO_DB = 1
 
     def __init__(self, sid=None, lifetime=DEFAULT_LIFETIME, no_datastore=False,
                  cookie_only_threshold=DEFAULT_COOKIE_ONLY_THRESH, cookie_key=None):
@@ -93,32 +94,50 @@ class Session(object):
         return b64encode(hmac.new(key, text, hashlib.sha256).digest())
 
     def __read_cookie(self):
+        if 'HTTP_COOKIE' in os.environ:
+            self.load_cookie(os.environ['HTTP_COOKIE'])
+
+    def load_cookie(self, cookie_string):
         """Reads the HTTP Cookie and loads the sid and data from it (if any)."""
         try:
             # check the cookie to see if a session has been started
-            cookie = SimpleCookie(os.environ['HTTP_COOKIE'])
+            cookie = SimpleCookie(cookie_string)
+            logging.info("JUST GOT COOKIE WHICH IS: {}".format(cookie))
             self.cookie_keys = filter(is_gaesessions_key, cookie.keys())
             if not self.cookie_keys:
+                logging.info ("NO APPROPRIATE KEYS")
                 return  # no session yet
             self.cookie_keys.sort()
+            logging.info ("THE KEYS: {}".format(self.cookie_keys))
             data = ''.join(cookie[k].value for k in self.cookie_keys)
+            logging.info("DATA: {}".format(data))
             i = SIG_LEN + SID_LEN
+            logging.info("i: {}".format(i))
             sig, sid, b64pdump = data[:SIG_LEN], data[SIG_LEN:i], data[i:]
+            logging.info("sig: {}".format(sig))
+            logging.info("sid: {}".format(sid))
+            logging.info("b64pdump: {}".format(b64pdump))
             pdump = b64decode(b64pdump)
             actual_sig = Session.__compute_hmac(self.base_key, sid, pdump)
             if sig == actual_sig:
+                logging.info("SIG MATCH")
                 self.__set_sid(sid, False)
                 # check for expiration and terminate the session if it has expired
                 if self.get_expiration() != 0 and time.time() > self.get_expiration():
+                    logging.info("EXPIRED")
                     return self.terminate()
 
                 if pdump:
+                    logging.info("LOADING NEW DATA")
                     self.data = self.__decode_data(pdump)
                 else:
+                    logging.info("SETTING NONE DATA")
                     self.data = None  # data is in memcache/db: load it on-demand
             else:
                 logging.warn('cookie with invalid sig received from %s: %s' % (os.environ.get('REMOTE_ADDR'), b64pdump))
-        except (CookieError, KeyError, IndexError, TypeError):
+        except (CookieError, KeyError, IndexError, TypeError), e:
+            logging.info ("OOPSIE: {}".format(e))
+            logging.info(traceback.print_exc(e))
             # there is no cookie (i.e., no session) or the cookie is invalid
             self.terminate(False)
 
